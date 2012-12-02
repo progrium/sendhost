@@ -10,7 +10,7 @@ import gevent.server
 import gevent.socket
 
 def peek_http_host(socket):
-    hostname = ''
+    host = ''
     hostheader = re.compile('host: ([^\(\);:,<>]+)', re.I)
     # Peek up to 512 bytes into data for the Host header
     for n in [128, 256, 512]:
@@ -20,10 +20,10 @@ def peek_http_host(socket):
         for line in bytes.split('\r\n'):
             match = hostheader.match(line)
             if match:
-                hostname = match.group(1)
-        if hostname:
+                host = match.group(1)
+        if host:
             break
-    return hostname
+    return host
 
 def recv_http_headers(socket):
     pass
@@ -48,6 +48,12 @@ def lookup_txt_attribute(domain, attribute, prefix=None, resolve_wildcard=True):
         pass
 
 def join_sockets(a, b):
+    class _codependents(gevent.pool.Group):
+        def discard(self, greenlet):
+            super(_codependents, self).discard(greenlet)
+            if not hasattr(self, '_killing'):
+                self._killing = True
+                gevent.spawn(self.kill)
     def _pipe(from_, to):
         while True:
             try:
@@ -65,20 +71,14 @@ def join_sockets(a, b):
             to.close()
         except: 
             pass
-    class _codependents(gevent.pool.Group):
-        def discard(self, greenlet):
-            super(_codependents, self).discard(greenlet)
-            if not hasattr(self, '_killing'):
-                self._killing = True
-                gevent.spawn(self.kill)
     return _codependents([
         gevent.spawn(_pipe, a, b),
         gevent.spawn(_pipe, b, a),
     ])
 
 def handler(socket, address):
-    hostname = peek_http_host(socket)
-    hostname = hostname.split(':')[0]
+    host = peek_http_host(socket)
+    hostname = host.split(':')[0]
     if not hostname:
         logging.debug("!no hostname, closing")
         socket.close()
@@ -106,9 +106,13 @@ HTTP/1.1 301 Moved Permanently\r\nLocation: {0}\r\nConnection: close\r\nContent-
         address = proxy_to.split(':')
         if len(address) == 1:
             address = (address[0], 80)
-        backend = gevent.socket.create_connection(address)
-        # TODO: insert headers: Via, X-Forwarded-For, Host
-        join_sockets(socket, backend)
+        try:
+            backend = gevent.socket.create_connection(address)
+            # TODO: insert headers: Via, X-Forwarded-For, Host
+            join_sockets(socket, backend)
+        except IOError:
+            socket.close()
+            return
 
 def run():
     logging.basicConfig(
